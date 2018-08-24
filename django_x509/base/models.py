@@ -88,7 +88,8 @@ def default_key_length():
 def default_digest_algorithm():
     """
     returns default value for digest field
-    (this avoids to set the exact default value in the database migration)
+    (this avoids to set the exact default
+    value in the database migration)
     """
     return app_settings.DEFAULT_DIGEST_ALGORITHM
 
@@ -121,7 +122,8 @@ class BaseX509(models.Model):
     country_code = models.CharField(max_length=2, blank=True)
     state = models.CharField(_('state or province'), max_length=64, blank=True)
     city = models.CharField(_('city'), max_length=64, blank=True)
-    organization_name = models.CharField(_('organization'), max_length=64, blank=True)
+    organization_name = models.CharField(
+        _('organization'), max_length=64, blank=True)
     organizational_unit_name = models.CharField(_('organizational unit name'),
                                                 max_length=64, blank=True)
     email = models.EmailField(_('email address'), blank=True)
@@ -129,18 +131,23 @@ class BaseX509(models.Model):
     extensions = JSONField(_('extensions'),
                            default=list,
                            blank=True,
-                           help_text=_('additional x509 certificate extensions'),
-                           load_kwargs={'object_pairs_hook': collections.OrderedDict},
+                           help_text=_(
+                               'additional x509 certificate extensions'),
+                           load_kwargs={
+                               'object_pairs_hook': collections.OrderedDict},
                            dump_kwargs={'indent': 4})
     # serial_number is set to CharField as a UUID integer is too big for a
     # PositiveIntegerField and an IntegerField on SQLite
     serial_number = models.CharField(_('serial number'),
-                                     help_text=_('leave blank to determine automatically'),
+                                     help_text=_(
+                                         'leave blank to determine automatically'),
                                      blank=True,
                                      null=True,
                                      max_length=39)
-    certificate = models.TextField(blank=True, help_text='certificate in X.509 PEM format')
-    private_key = models.TextField(blank=True, help_text='private key in X.509 PEM format')
+    certificate = models.TextField(
+        blank=True, help_text='certificate in X.509 PEM format')
+    private_key = models.TextField(
+        blank=True, help_text='private key in X.509 PEM format')
     created = AutoCreatedField(_('created'), editable=True)
     modified = AutoLastModifiedField(_('modified'), editable=True)
     passphrase = models.CharField(max_length=64,
@@ -228,10 +235,12 @@ class BaseX509(models.Model):
                 args = (crypto.FILETYPE_PEM, getattr(self, field))
                 kwargs = {}
                 if method_name == 'load_privatekey':
-                    kwargs['passphrase'] = getattr(self, 'passphrase').encode('utf8')
+                    kwargs['passphrase'] = getattr(
+                        self, 'passphrase').encode('utf8')
                 load_pem(*args, **kwargs)
             except OpenSSL.crypto.Error as e:
-                errors[field] = ValidationError(_('OpenSSL error: {0}'.format(e.args[0])))
+                errors[field] = ValidationError(
+                    _('OpenSSL error: {0}'.format(e.args[0])))
         if errors:
             raise ValidationError(errors)
 
@@ -243,7 +252,8 @@ class BaseX509(models.Model):
         try:
             int(self.serial_number)
         except ValueError:
-            raise ValidationError({'serial_number': _('Serial number must be an integer')})
+            raise ValidationError(
+                {'serial_number': _('Serial number must be an integer')})
 
     def _generate(self):
         """
@@ -257,8 +267,10 @@ class BaseX509(models.Model):
         cert.set_version(0x2)  # version 3 (0 indexed counting)
         cert.set_subject(subject)
         cert.set_serial_number(int(self.serial_number))
-        cert.set_notBefore(bytes_compat(self.validity_start.strftime(generalized_time)))
-        cert.set_notAfter(bytes_compat(self.validity_end.strftime(generalized_time)))
+        cert.set_notBefore(bytes_compat(
+            self.validity_start.strftime(generalized_time)))
+        cert.set_notAfter(bytes_compat(
+            self.validity_end.strftime(generalized_time)))
         # generating certificate for CA
         if not hasattr(self, 'ca'):
             issuer = cert.get_subject()
@@ -271,13 +283,10 @@ class BaseX509(models.Model):
         cert.set_pubkey(key)
         cert = self._add_extensions(cert)
         cert.sign(issuer_key, str(self.digest))
-        self.certificate = crypto.dump_certificate(crypto.FILETYPE_PEM, cert).decode("utf-8")
-        key_args = (crypto.FILETYPE_PEM, key)
-        key_kwargs = {}
-        if self.passphrase:
-            key_kwargs['passphrase'] = self.passphrase.encode('utf-8')
-            key_kwargs['cipher'] = 'DES-EDE3-CBC'
-        self.private_key = crypto.dump_privatekey(*key_args, **key_kwargs).decode("utf-8")
+        self.certificate = crypto.dump_certificate(
+            crypto.FILETYPE_PEM, cert).decode("utf-8")
+        self.private_key = crypto.dump_privatekey(
+            crypto.FILETYPE_PEM, key).decode("utf-8")
 
     def _fill_subject(self, subject):
         """
@@ -421,6 +430,99 @@ class BaseX509(models.Model):
         return cert
 
 
+class BaseUUID(BaseX509):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    def save(self, *args, **kwargs):
+        generate = False
+        if not self.certificate and not self.private_key:
+            generate = True
+        super(BaseUUID, self).save(*args, **kwargs)
+        if generate:
+            # automatically determine serial number
+            if not self.serial_number:
+                self.serial_number = uuid.uuid4().int
+            self._generate()
+            kwargs['force_insert'] = False
+            super(BaseUUID, self).save(*args, **kwargs)
+
+    class Meta:
+        abstract = True
+
+
+class AbstractUUIDCa(BaseUUID):
+    """
+    Abstract UUID Ca model
+    """
+    class Meta:
+        abstract = True
+        verbose_name = _('CA')
+        verbose_name_plural = _('CAs')
+
+    def get_revoked_certs(self):
+        """
+        Returns revoked certificates of this CA
+        (does not include expired certificates)
+        """
+        now = timezone.now()
+        return self.uuidcert_set.filter(revoked=True,
+                                        validity_start__lte=now,
+                                        validity_end__gte=now)
+
+    @property
+    def crl(self):
+        """
+        Returns up to date CRL of this CA
+        """
+        revoked_certs = self.get_revoked_certs()
+        crl = crypto.CRL()
+        now_str = timezone.now().strftime(generalized_time)
+        for cert in revoked_certs:
+            revoked = crypto.Revoked()
+            revoked.set_serial(bytes_compat(cert.serial_number))
+            revoked.set_reason(b'unspecified')
+            revoked.set_rev_date(bytes_compat(now_str))
+            crl.add_revoked(revoked)
+        return crl.export(self.x509, self.pkey, days=1, digest=b'sha256')
+
+
+AbstractUUIDCa._meta.get_field(
+    'validity_end').default = default_ca_validity_end
+
+
+class AbstractUUIDCert(BaseUUID):
+    """
+    Abstract UUID Cert model
+    """
+    ca = models.ForeignKey('django_x509.UUIDCa',
+                           on_delete=models.CASCADE, verbose_name=_('CA'))
+    revoked = models.BooleanField(_('revoked'),
+                                  default=False)
+    revoked_at = models.DateTimeField(_('revoked at'),
+                                      blank=True,
+                                      null=True,
+                                      default=None)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        abstract = True
+        verbose_name = _('certificate')
+        verbose_name_plural = _('certificates')
+        unique_together = ('ca', 'serial_number')
+
+    def revoke(self):
+        """
+        * flag certificate as revoked
+        * fill in revoked_at DateTimeField
+        """
+        now = timezone.now()
+        self.revoked = True
+        self.revoked_at = now
+        self.save()
+
+
 class AbstractCa(BaseX509):
     """
     Abstract Ca model
@@ -464,7 +566,11 @@ class AbstractCert(BaseX509):
     """
     Abstract Cert model
     """
-    ca = models.ForeignKey('django_x509.Ca', on_delete=models.CASCADE, verbose_name=_('CA'))
+    ca = models.ForeignKey(
+        'django_x509.Ca',
+        on_delete=models.CASCADE,
+        verbose_name=_('CA')
+    )
     revoked = models.BooleanField(_('revoked'),
                                   default=False)
     revoked_at = models.DateTimeField(_('revoked at'),

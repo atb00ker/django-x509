@@ -9,6 +9,13 @@
     </a>
 </li>
 {% endif %}
+{% if opts.model_name == 'uuidca' %}
+<li>
+    <a href="{% url 'x509:uuidcrl' object_id %}" class="downloadcrl">
+        {% trans "Download CRL" %}
+    </a>
+</li>
+{% endif %}
 {{ block.super }}
 {% endblock %}
 
